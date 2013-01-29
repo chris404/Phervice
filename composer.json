@@ -1,0 +1,14 @@
+{
+    "name": "chris404/phervice",
+    "description": "Simple php event system",
+    "type": "library",
+    "keywords": ["service","event","observer"],
+    "homepage": "http://github.com/chris404/phervice",
+	"license":  "BSD",
+    "require": {
+        "php": ">=5.4"
+    },
+    "autoload": {
+        "psr-0": { "Phervice": "Phervice/" }
+    }
+}
