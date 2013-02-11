@@ -31,7 +31,7 @@ class Container {
 	
 	
 	/**
-	 * mapping of service names to thier observer service names
+	 * mapping of service names to thier observer Service instances
 	 *
 	 * @var array
 	 */
@@ -39,26 +39,20 @@ class Container {
 	
 	
 	/**
-	 * Instance of Cache used for caching observer mappings and annotations
 	 *
-	 * @var Cache
+	 * @var bool
 	 */
-	protected $cache;
-	
+	protected $modified = false;
 
+
+	
 	/**
 	 * creates new Container instance
 	 * 
 	 * @param array $config
 	 * @param \Phervice\Cache $cache
 	 */
-	public function __construct(array $config=array(), Cache $cache=null) {
-		
-		if (isset($cache)) {
-			$this->cache = $cache;
-		} else {
-			$this->cache = new Cache;
-		}
+	public function __construct(array $config=array()) {
 		
 		if (isset($config['aliases']) && is_array($config['aliases'])) {
 			$this->aliases = $config['aliases'];
@@ -67,12 +61,15 @@ class Container {
 		if (isset($config['observers']) && is_array($config['observers'])) {
 			$this->observers = $config['observers'];
 		}
-		
-		if (isset($config['autoInit']) && is_array($config['autoInit'])) {
-			foreach($config['autoInit'] as $serviceName) {
-				$this->init($serviceName);
-			}
-		}
+	}
+	
+	
+	/**
+	 * 
+	 * @return bool
+	 */
+	public function getModified() {
+		return $this->modified;
 	}
 	
 	
@@ -119,7 +116,7 @@ class Container {
 	 * @param array $args
 	 * @return mixed - result of the service invocation
 	 */
-	public function execArgs($serviceName, $args) {
+	public function execArgs($serviceName, array $args) {
 		
 		$service = $this->get($serviceName);
 		$observers = $this->getObservers($serviceName);
@@ -128,7 +125,7 @@ class Container {
 			return $service->handle($args);
 			
 		} else {
-			return $this->callObserverChain($observers, $args, $service);
+			return Chain::invoke($serviceName, $observers, $args, $service);
 		}
 	}
 	
@@ -138,50 +135,9 @@ class Container {
 	 * @param string $serviceName
 	 * @param array $args
 	 */
-	public function broadcastArgs($serviceName, $args) {
+	public function broadcastArgs($serviceName, array $args) {
 		$observers = $this->getObservers($serviceName);
-		$this->callObserverChain($observers, $args);
-	}
-	
-	
-	/**
-	 * Builds the "chain" closure to be passed to each observer.
-	 * 
-	 * @param array $observers - array of observer services
-	 * @param array $args - array of args passed to the service
-	 * @param Service $service - optional service to be invoked at "end" of observer chain
-	 * @return mixed - result from service invocation, null if no service provided
-	 */
-	public function callObserverChain(array $observers, array $args, Service $service=null) {
-		
-		# Define the closure to invoke, this will be called for each observer and the service.
-		$chain = function() use (&$chain, &$observers, $args, $service) {
-			
-			# If the invokation of this function included arguments then use those instead.
-			if (func_num_args() > 0) {
-				$args = func_get_args();
-			}
-			
-			# If there are more observers then continue to cycle through them.
-			if (count($observers) > 0) {
-				$observer = array_shift($observers);
-				# Add this closure as the first argument so observers can continue the chain.
-				array_unshift($args, $chain);
-				# invoke observer
-				return $observer->handle($args);
-				
-			# No more observers but there is a service, so use that. Since this is the end
-			# of the line there's no need to include this closure in the agrument array.			
-			} elseif ($service !== null) {
-				return $service->handle($args);
-			}
-			
-			# No more observers and no service, so just return null.
-			return null;
-		};
-		
-		# start the chain!
-		return $chain();
+		return Chain::invoke($serviceName, $observers, $args);
 	}
 	
 	
@@ -195,42 +151,26 @@ class Container {
 		
 		if (isset($this->serviceObservers[$serviceName]) === false) {
 			
-			$cache = $this->getCache();
-			$observerMap = $cache->getObserverMap($serviceName);
+			$this->modified = true;
 			
-			if ($observerMap === null) {
-			
-				$observerMap = array();
-
-				foreach($this->observers as $query => $observers) {
-					if (preg_match($query, $serviceName)) {
-						$observerMap += $observers;
-					}
+			$observerMap = array();
+			foreach($this->observers as $query => $observers) {
+				if (preg_match($query, $serviceName)) {
+					$observerMap += $observers;
 				}
-				
-				$observerMap = array_unique($observerMap);
-				$cache->setObserverMap($serviceName, $observerMap);
 			}
+			$observerMap = array_unique($observerMap);
 			
 			$observers = array();
 			foreach($observerMap as $observerName) {
 				$observers[] = $this->get($observerName);
 			}
+			
 			$this->serviceObservers[$serviceName] = $observers;
 		}
 		
 		return $this->serviceObservers[$serviceName];
 	}
-	
-	
-	/**
-	 * 
-	 * @return Cache
-	 */
-	public function getCache() {
-		return $this->cache;
-	}
-	
 	
 	
 	/**
@@ -254,6 +194,8 @@ class Container {
 		$segments = str_replace('.', ' ', $serviceName);
 		$ucSegments = ucwords($segments);
 		$className = str_replace(' ', '\\', $ucSegments);
+		
+		$this->modified = true;
 		
 		# if no class then create a new one
 		if (isset($this->instances[$className]) === false) {

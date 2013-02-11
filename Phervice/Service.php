@@ -2,7 +2,35 @@
 
 namespace Phervice;
 
+
+use ReflectionClass;
+use ReflectionMethod;
+use ReflectionProperty;
+use ReflectionException;
+
+
 class Service {
+	
+	
+	/**
+	 *
+	 * @var ReflectionClass
+	 */
+	protected $reflectionClass;
+	
+	
+	/**
+	 *
+	 * @var mixed
+	 */
+	protected $instance;
+	
+	
+	/**
+	 *
+	 * @var string
+	 */
+	protected $className;
 	
 	
 	/**
@@ -14,96 +42,152 @@ class Service {
 	
 	/**
 	 *
-	 * @var type 
+	 * @var array
 	 */
-	protected $instance;
+	protected $propertyAnnotations;
 	
 	
 	/**
 	 *
-	 * @var \ReflectionHandle
+	 * @var array
 	 */
-	protected $reflectionHandle;
+	protected $methodAnnotations;
+	
+	
+	/**
+	 *
+	 * @var array
+	 */
+	protected $constructAnnotations;
 
-		
+
 	/**
 	 * 
 	 * @param type $className
 	 * @param \Phervice\Container $container
 	 */
 	public function __construct($className, Container $container) {
-		
+		$this->className = $className;
 		$this->container = $container;
+		$this->getInstance();
+	}
+	
+	
+	public function __sleep() {
 		
-		try {
-			$reflectionClass = new \ReflectionClass($className);
-		} catch(\ReflectionException $e) {
-			throw new Exception($e->getMessage());
-		}
-		
-		// create instance
-		if ($reflectionClass->hasMethod('__construct')) {
-			$reflectionConstruct = $reflectionClass->getMethod('__construct');
-			$args = $this->prepMethod($reflectionConstruct);
-			$this->instance = $reflectionClass->newInstanceArgs($args);
+		if ($this->getInstance() instanceof SerializableService) {
+			return array('className', 'container', 'instance');
 			
 		} else {
-			$this->instance = new $className;
+			return array('className', 'container', 'propertyAnnotations', 'methodAnnotations', 'constructAnnotations');
 		}
-		
-		
-		// set any pre-set properties
-		/* @var $reflectionProperty \ReflectionProperty */
-		foreach($reflectionClass->getProperties() as $reflectionProperty) {
-			$this->setProperty($reflectionProperty);
-		}
-		
-		// invoke any init methods
-		/* @var $reflectionMethod \ReflectionMethod */
-		foreach($reflectionClass->getMethods() as $reflectionMethod) {
-			if (strpos($reflectionMethod->getName(), 'init') === 0) {
-				$args = $this->prepMethod($reflectionMethod);
-				$reflectionMethod->invokeArgs($this->instance, $args);
-			}
-		}
-		
-		$this->reflectionHandle = $reflectionClass->getMethod('handle');
 	}
 	
 	
 	public function handle(array $args) {
-		return $this->reflectionHandle->invokeArgs($this->instance, $args);
+		$callable = array($this->getInstance(), 'handle');
+		return call_user_func_array($callable, $args);
 	}
 	
 	
-
-	protected function setProperty(\ReflectionProperty $reflectionProperty) {
-		
-		$cache = $this->container->getCache();
-		$annotations = $cache->getPropertyAnnotations($reflectionProperty);
-		
-		if ($annotations === null) {
-			$annotations = $this->buildPropertyAnnotations($reflectionProperty);
-			$cache->setPropertyAnnotations($reflectionProperty, $annotations);
+	protected function getReflectionClass() {
+		if ($this->reflectionClass === false) {
+			try {
+				$this->reflectionClass = new ReflectionClass($this->className);
+			} catch(ReflectionException $e) {
+				throw new Exception($e->getMessage());
+			}
 		}
+		return $this->reflectionClass;
+	}
+	
+	
+	protected function getInstance() {
 		
-		if (is_array($annotations)) {
-			list($name, $args) = $annotations;
+		if ($this->instance === null) {
+			
+			$reflectionClass = $this->getReflectionClass();
+			
+			if ($reflectionClass->hasMethod('__construct')) {
+				$this->getMethodAnnotations();
+				$args = $this->buildArgs($this->constructAnnotations);
+				$reflectionConstruct = $reflectionClass->getMethod('__construct');
+				$this->instance = $reflectionConstruct->newInstanceArgs($args);
 
-			if ($name) {
-				$propertyValue = $this->container->execArgs($name, $args);
 			} else {
-				$propertyValue = $this->container;
+				$this->instance = new $this->className;
 			}
 
+			$this->initProperties();
+			$this->initMethods();
+		}
+		return $this->instance;
+	}
+	
+
+	protected function initProperties() {
+		$reflectionClass = $this->getReflectionClass();
+		$instance = $this->getInstance();
+		
+		foreach($this->getPropertyAnnotations() as $propertName => $annotation) {
+			$propertyValue = $this->buildArgs(array($annotation));
+			$reflectionProperty = $reflectionClass->getProperty($propertName);
 			$reflectionProperty->setAccessible(true);
-			$reflectionProperty->setValue($this->instance, $propertyValue);
+			$reflectionProperty->setValue($instance, $propertyValue);
 		}
 	}
 	
 	
+	protected function initMethods() {
+		$reflectionClass = $this->getReflectionClass();
+		$instance = $this->getInstance();
+		
+		foreach($this->getMethodAnnotations() as $methodName => $annotations) {
+			$args = $this->buildArgs($annotations);
+			$reflectionMethod = $reflectionClass->getMethod($methodName);
+			$reflectionMethod->invokeArgs($instance, $args);
+		}
+	}
 	
-	protected function buildPropertyAnnotations(\ReflectionProperty $reflectionProperty) {
+	
+	protected function buildArgs(array $annotations) {
+		$args = array();
+		foreach($annotations as $annotation) {
+
+			if ($annotation['name']) {
+				$result = $this->container->execArgs($annotation['name'], $annotation['args']);
+			} else {
+				$result = $this->container;
+			}
+
+			if ($annotation['type'] == 'param') {
+				$args[] = $result;
+			} elseif ($annotation['type'] == 'set') {
+				return $result;
+			}
+		}
+		return $args;
+	}
+
+
+	protected function getPropertyAnnotations() {
+		
+		if ($this->propertyAnnotations === null) {
+			$this->propertyAnnotations = array();
+			
+			/* @var $reflectionProperty ReflectionProperty */
+			foreach($this->getReflectionClass()->getProperties() as $reflectionProperty) {
+				$annotations = $this->parsePropertyAnnotations($reflectionProperty);
+				if ($annotations) {
+					$this->propertyAnnotations[$reflectionProperty->getName()] = $annotations;
+				}
+			}
+		}
+		return $this->propertyAnnotations;
+	}
+	
+	
+	protected function parsePropertyAnnotations(ReflectionProperty $reflectionProperty) {
 		
 		$docString = $reflectionProperty->getDocComment();
 		if ($docString && preg_match('/ @set ~([\w\.]*)(?:\(([^)]*)\))?/', $docString, $annotation)) {
@@ -112,52 +196,45 @@ class Service {
 
 			$args = $this->resolveArgString($argString, $reflectionProperty);
 
-			return array($name, $args);
+			return array(
+				'type' => 'set',
+				'name' => $name,
+				'args' => $args
+			);
 		}
 		
 		return false;
 	}
-
-
-
-	protected function prepMethod(\ReflectionMethod $reflectionMethod) {
+	
+	
+	protected function getMethodAnnotations() {
 		
-		$reflectionMethod->setAccessible(true);
+		if ($this->methodAnnotations === null) {
+			$this->methodAnnotations = array();
 		
-		$cache = $this->container->getCache();
-		$annotations = $cache->getMethodAnnotations($reflectionMethod);
-		
-		if ($annotations === null) {
-			$annotations = $this->buildMethodAnnotations($reflectionMethod);
-			$cache->setMethodAnnotations($reflectionMethod, $annotations);
-		}
-		
-		$params = array();
-		foreach($annotations as $annotation) {
-			list($type, $name, $args) = $annotation;
-			
-			if ($type == 'init') {
-				$this->container->execArgs($name, $args);
+			/* @var $reflectionMethod ReflectionMethod */
+			foreach($this->getReflectionClass()->getMethods() as $reflectionMethod) {
 				
-			} elseif ($type == 'param') {
-				
-				if ($name) {
-					$params[] = $this->container->execArgs($name, $args);
-				} else {
-					$params[] = $this->container;
+				$methodName = $reflectionMethod->getName();
+				if (strpos($methodName, 'init') === 0) {
+					$annotations = $this->parseMethodAnnotations($reflectionMethod);
+					$this->methodAnnotations[$reflectionMethod->getName()] = $annotations;
+					
+				} elseif ($methodName == '__construct') {
+					$annotations = $this->parseMethodAnnotations($reflectionMethod);
+					$this->constructAnnotations = $annotations;
 				}
 			}
 		}
-		
-		return $params;
+		return $this->methodAnnotations;
 	}
 	
 	
-	protected function buildMethodAnnotations(\ReflectionMethod $reflectionMethod) {
+	protected function parseMethodAnnotations(ReflectionMethod $reflectionMethod) {
 		
 		$docString = $reflectionMethod->getDocComment();
 		if ($docString) {
-			preg_match_all('/ @((?:init)|(?:param))(?: \w+)? ~([\w\.]*)(?:\((.*)\))?/', $docString, $matches, PREG_SET_ORDER);
+			preg_match_all('/ @((?:init)|(?:param))(?: \w+(?: \$?\w+)?)? ~([\w\.]*)(?:\((.*)\))?/', $docString, $matches, PREG_SET_ORDER);
 		} else {
 			$matches = array();
 		}
@@ -168,7 +245,11 @@ class Service {
 
 			$args = $this->resolveArgString($argString, $reflectionMethod);
 
-			$annotations[] = array($type, $name, $args);
+			$annotations[] = array(
+				'type' => $type,
+				'name' => $name,
+				'args' => $args
+			);
 		}
 		
 		return $annotations;
@@ -189,5 +270,4 @@ class Service {
 		
 		throw new Exception(array('Invalid argument signature (%s) on %s::%s', $argString, $reflection->class, $reflection->name));
 	}
-	
 }
